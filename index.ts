@@ -1,6 +1,8 @@
 import { ApolloServer, gql } from "apollo-server";
-import { Asset, CogniteEvent } from "@cognite/sdk";
+import { Asset, CogniteEvent, Timeseries } from "@cognite/sdk";
 import { cogniteClient } from "./cognite-client";
+import { chunk, flatten } from "lodash";
+import DataLoader from "dataloader";
 
 const typeDefs = gql`
   type Asset {
@@ -31,11 +33,6 @@ const typeDefs = gql`
   }
 `;
 
-interface MyAsset {
-  id: number;
-  name: string;
-}
-
 const resolvers = {
   Query: {
     assets: () =>
@@ -48,37 +45,90 @@ const resolvers = {
   },
 
   Asset: {
-    timeseries: (asset: Asset) =>
-      cogniteClient.timeseries
-        .list({ filter: { assetIds: [asset.id] } })
-        .then((res) => res.items),
+    timeseries: (asset: Asset, args: any, context: any) =>
+      context.dataloaders.timeseriesForAssetLoader.load(asset.id),
 
-    parentAsset: (asset: Asset) =>
+    parentAsset: (asset: Asset, args: any, context: any) =>
       asset.parentId
-        ? cogniteClient.assets
-            .retrieve([{ id: asset.parentId }])
-            .then((res) => (res.length ? res[0] : null))
+        ? context.dataloaders.assetLoader.load(asset.parentId)
         : null,
 
-    childrenAssets: (asset: Asset) =>
-      cogniteClient.assets
-        .list({ filter: { parentIds: [asset.id] } })
-        .then((res) => res.items),
+    childrenAssets: (asset: Asset, args: any, { dataloaders }: any) =>
+      dataloaders.assetsChildrenloader.load(asset.id),
 
-    events: (asset: Asset) =>
-      cogniteClient.events
-        .list({ filter: { assetIds: [asset.id] } })
-        .then((res) => res.items),
+    events: (asset: Asset, args: any, context: any) =>
+      context.dataloaders.eventsForAssetLoader.load(asset.id),
   },
 
   Event: {
     actionLevel: (event: CogniteEvent) => event.metadata?.actionLevel,
-    startTime: (event: CogniteEvent) => event.startTime ? new Date(event.startTime).toISOString() : null,
-    endTime: (event: CogniteEvent) => event.endTime ? new Date(event.endTime).toISOString() : null,
+    startTime: (event: CogniteEvent) =>
+      event.startTime ? new Date(event.startTime).toISOString() : null,
+    endTime: (event: CogniteEvent) =>
+      event.endTime ? new Date(event.endTime).toISOString() : null,
   },
 };
 
-const server = new ApolloServer({ typeDefs, resolvers });
+function batchAssets(assetIds: number[]) {
+  console.log("Batch assets fetch", assetIds);
+  return cogniteClient.assets.retrieve(assetIds.map((id) => ({ id: id })));
+}
+
+function batchAssetTimeseries(assetIds: number[]): Promise<Timeseries[][]> {
+  console.log("Batch asset timeseries fetch", assetIds);
+  const idsChunks: number[][] = chunk(assetIds, 100); // CDF - limitation - up to 100 tds per request
+
+  return Promise.all(
+    idsChunks.map((idsChunk) =>
+      cogniteClient.timeseries
+        .list({ filter: { assetIds: idsChunk } })
+        .then((res) => res.items)
+    )
+  )
+    .then((tsChunks: Timeseries[][]) => flatten(tsChunks))
+    .then((timeseries: Timeseries[]) =>
+      assetIds.map((key) => timeseries.filter((ts) => ts.assetId === key))
+    );
+}
+
+function batchAssetEvents(assetIds: number[]): Promise<CogniteEvent[][]> {
+  console.log("Batch asset events fetch", assetIds);
+
+  return cogniteClient.events
+    .list({ filter: { assetIds: assetIds } })
+    .then((res) =>
+      assetIds.map((key) =>
+        res.items.filter((event) => event.assetIds?.some((id) => id === key))
+      )
+    );
+}
+
+function batchAssetChildren(assetIds: number[]): Promise<CogniteEvent[][]> {
+  console.log("Batch asset children fetch", assetIds);
+
+  return cogniteClient.assets
+    .list({ filter: { parentIds: assetIds } })
+    .then((res) =>
+      assetIds.map((key) => res.items.filter((asset) => asset.parentId === key))
+    );
+}
+
+const server = new ApolloServer({
+  typeDefs,
+  resolvers,
+  context: {
+    dataloaders: {
+      // @ts-ignore
+      assetLoader: new DataLoader(batchAssets),
+      // @ts-ignore
+      timeseriesForAssetLoader: new DataLoader(batchAssetTimeseries),
+      // @ts-ignore
+      eventsForAssetLoader: new DataLoader(batchAssetEvents),
+      // @ts-ignore
+      assetsChildrenloader: new DataLoader(batchAssetChildren),
+    },
+  },
+});
 
 server.listen().then(({ url }) => {
   console.log(`🚀  Server ready at ${url}`);

@@ -11,9 +11,12 @@
   "license": "ISC",
   "dependencies": {
     "@cognite/sdk": "^4.1.0",
+    "@types/lodash": "^4.14.170",
     "apollo-server": "^2.25.1",
+    "dataloader": "^2.0.0",
     "dotenv": "^10.0.0",
-    "graphql": "^15.5.0"
+    "graphql": "^15.5.0",
+    "lodash": "^4.17.21"
   },
   "devDependencies": {
     "ts-node": "^10.0.0",
